@@ -31,12 +31,10 @@ jobs:
         tags: ghcr.io/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
-        # UI repo only: build-args: NEXT_PUBLIC_API_URL=https://app.example.com
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    # dev branch -> dev env; main -> prod env (with approval)
     environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
     steps:
     - uses: actions/checkout@v4
