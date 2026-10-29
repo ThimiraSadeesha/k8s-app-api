@@ -1,3 +1,13 @@
+# Build and deploy k8s-app-api (manifests live in ThimiraSadeesha/k8s-config).
+#
+# dev branch -> dev namespace.  main branch -> prod namespace (needs GitHub Environment approval).
+#
+# Repo secrets (Settings > Secrets and variables > Actions):
+#   KUBE_CONFIG_DEV    base64 kubeconfig of the dev ci-deployer   (scripts/make-ci-kubeconfig.sh dev)
+#   KUBE_CONFIG_PROD   same for prod; leave unset until prod is ready
+#   CONFIG_REPO_TOKEN  fine-grained PAT, repo k8s-config, Contents: read and write
+# Environments: "dev" (no rules) and "prod" (Required reviewers = manual approval).
+# GHCR image names must be lowercase, hence OWNER below.
 name: build-and-deploy
 on:
   push:
@@ -7,6 +17,11 @@ env:
   IMAGE_NAME: k8s-app-api
   OWNER: thimirasadeesha
   CONFIG_REPO: ThimiraSadeesha/k8s-config
+
+# one deploy at a time per branch; a newer push waits instead of racing
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -36,29 +51,38 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    env:
+      OVERLAY: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+      KUBE_CONFIG_B64: ${{ github.ref_name == 'main' && secrets.KUBE_CONFIG_PROD || secrets.KUBE_CONFIG_DEV }}
+      TAG: ${{ needs.build.outputs.tag }}
     steps:
     - uses: actions/checkout@v4
       with:
         repository: ${{ env.CONFIG_REPO }}
         token: ${{ secrets.CONFIG_REPO_TOKEN }}
-    - name: Pick target
+
+    # k8s-config is the source of truth: record the new tag there first, so the repo never
+    # lags behind the cluster. Retries cover another repo pushing at the same moment.
+    - name: Record image tag in k8s-config
       run: |
-        if [ "${GITHUB_REF_NAME}" = "main" ]; then
-          echo "OVERLAY=prod" >> "$GITHUB_ENV"
-          echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > "$RUNNER_TEMP/kubeconfig"
-        else
-          echo "OVERLAY=dev" >> "$GITHUB_ENV"
-          echo "${{ secrets.KUBE_CONFIG_DEV }}" | base64 -d > "$RUNNER_TEMP/kubeconfig"
-        fi
-        echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
-    - name: Set image tag and apply
-      working-directory: config/overlays/${{ env.OVERLAY }}
+        f=config/overlays/$OVERLAY/kustomization.yaml
+        sed -i -E "s#(name: ghcr\.io/$OWNER/$IMAGE_NAME, newTag: ).*#\1\"$TAG\" }#" "$f"
+        grep -q "name: ghcr.io/$OWNER/$IMAGE_NAME, newTag: \"$TAG\" }" "$f" || { echo "image entry for $IMAGE_NAME not found in $f"; exit 1; }
+        git config user.name "ci"
+        git config user.email "ci@users.noreply.github.com"
+        git diff --quiet || git commit -am "deploy $IMAGE_NAME $TAG to $OVERLAY"
+        pushed=false
+        for i in 1 2 3 4; do
+          if git pull --rebase origin main && git push origin HEAD:main; then pushed=true; break; fi
+          sleep $((i * 3))
+        done
+        $pushed
+
+    - name: Apply to the cluster
       run: |
-        kustomize edit set image ghcr.io/${{ env.OWNER }}/${{ env.IMAGE_NAME }}=ghcr.io/${{ env.OWNER }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.tag }}
-        kubectl apply -k .
-        kubectl rollout status deploy/${{ env.IMAGE_NAME }} -n ${{ env.OVERLAY }} --timeout=180s
-    - name: Record deployed tag in config repo
-      run: |
-        git config user.name ci && git config user.email ci@users.noreply.github.com
-        git commit -am "deploy ${{ env.IMAGE_NAME }} ${{ needs.build.outputs.tag }} to ${{ env.OVERLAY }}" || true
-        git push || true
+        test -n "$KUBE_CONFIG_B64" || { echo "kubeconfig secret for $OVERLAY is not set"; exit 1; }
+        mkdir -p ~/.kube
+        echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
+        chmod 600 ~/.kube/config
+        kubectl apply -k config/overlays/$OVERLAY
+        kubectl rollout status deploy/$IMAGE_NAME -n $OVERLAY --timeout=180s
