@@ -1,13 +1,3 @@
-# Build and deploy k8s-app-api (manifests live in ThimiraSadeesha/k8s-config).
-#
-# dev branch -> dev namespace.  main branch -> prod namespace (needs GitHub Environment approval).
-#
-# Repo secrets (Settings > Secrets and variables > Actions):
-#   KUBE_CONFIG_DEV    base64 kubeconfig of the dev ci-deployer   (scripts/make-ci-kubeconfig.sh dev)
-#   KUBE_CONFIG_PROD   same for prod; leave unset until prod is ready
-#   CONFIG_REPO_TOKEN  fine-grained PAT, repo k8s-config, Contents: read and write
-# Environments: "dev" (no rules) and "prod" (Required reviewers = manual approval).
-# GHCR image names must be lowercase, hence OWNER below.
 name: build-and-deploy
 on:
   push:
@@ -18,7 +8,7 @@ env:
   OWNER: thimirasadeesha
   CONFIG_REPO: ThimiraSadeesha/k8s-config
 
-# one deploy at a time per branch; a newer push waits instead of racing
+
 concurrency:
   group: deploy-${{ github.ref_name }}
   cancel-in-progress: false
